@@ -91,6 +91,8 @@ import { registerRetentionFunctions } from "./functions/retention.js";
 import { registerCompressFileFunction } from "./functions/compress-file.js";
 import { registerReplayFunctions } from "./functions/replay.js";
 import { registerApiTriggers } from "./triggers/api.js";
+import { registerDashboardTriggers } from "./dashboard/routes.js";
+import { isDashboardEnabled, getSessionTtlMinutes } from "./dashboard/session.js";
 import { registerEventTriggers } from "./triggers/events.js";
 import { registerMcpEndpoints } from "./mcp/server.js";
 import { getAllTools } from "./mcp/tools-registry.js";
@@ -392,6 +394,7 @@ async function main() {
   registerRecentSearchesSweepFunction(sdk, kv);
 
   registerApiTriggers(sdk, kv, secret, metricsStore, provider);
+  registerDashboardTriggers(sdk);
   registerEventTriggers(sdk, kv);
   registerMcpEndpoints(sdk, kv, secret);
 
@@ -554,6 +557,14 @@ async function main() {
     secret,
     config.restPort,
   );
+
+  if (isDashboardEnabled()) {
+    bootLog(
+      `Dashboard: /dashboard/view (password-gated, ${getSessionTtlMinutes()}m sessions)`,
+    );
+  } else {
+    bootLog(`Dashboard: disabled (set AGENTMEMORY_PASSWORD to enable)`);
+  }
 
   const autoForgetIntervalMs = parseInt(process.env.AUTO_FORGET_INTERVAL_MS || "3600000", 10);
   const consolidationIntervalMs = parseInt(process.env.CONSOLIDATION_INTERVAL_MS || "7200000", 10);

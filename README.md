@@ -66,6 +66,7 @@
   <a href="#how-it-works">How It Works</a> &bull;
   <a href="#mcp-server">MCP</a> &bull;
   <a href="#real-time-viewer">Viewer</a> &bull;
+  <a href="#remote-dashboard">Dashboard</a> &bull;
   <a href="#iii-console">iii Console</a> &bull;
   <a href="#powered-by-iii">Powered by iii</a> &bull;
   <a href="#configuration">Config</a> &bull;
@@ -1097,6 +1098,70 @@ open http://localhost:3113
 ```
 
 The viewer server binds to `127.0.0.1` by default. The REST-served `/agentmemory/viewer` endpoint follows the normal `AGENTMEMORY_SECRET` bearer-token rules. CSP headers use a per-response script nonce and disable inline handler attributes (`script-src-attr 'none'`).
+
+---
+
+<h2 id="remote-dashboard">Remote Dashboard</h2>
+
+The viewer above is loopback-only, which is the right default locally but leaves remote deployments with nothing to open in a browser: `/agentmemory/viewer` requires a bearer token on the HTML itself, and a browser cannot attach one to a navigation. The remote dashboard closes that gap — same viewer, reached through a password form.
+
+```bash
+# On the server, before starting agentmemory:
+export AGENTMEMORY_PASSWORD="$(openssl rand -base64 32)"
+```
+
+Then open `https://your-host/dashboard/view` and enter the password. Everything the local viewer shows — memories, sessions, graph, lessons, audit, replay — is available once the session is established.
+
+**Unset by default.** With no `AGENTMEMORY_PASSWORD` the routes answer `503` and nothing is exposed. Setting the password is what turns the feature on.
+
+**It is a separate key from `AGENTMEMORY_SECRET`, with no fallback.** The secret authorizes your MCP clients and the entire REST surface; if the dashboard password leaks you rotate it alone and every wired agent keeps working.
+
+### How the session works
+
+`POST /dashboard/login` compares the password in constant time and, on success, sets a signed session cookie:
+
+```
+agentmemory_dashboard=<token>; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=7200
+```
+
+The token is a stateless HMAC (`<expiry>.<nonce>.<signature>`) signed with a key generated fresh at process start — so there is no session store to keep in sync, and **restarting the daemon logs every browser out**. `HttpOnly` keeps it out of JavaScript, and `SameSite=Strict` means it is never attached to a cross-site request, which is what protects the state-changing REST routes from CSRF.
+
+The cookie is accepted as a second credential alongside the bearer token everywhere `AGENTMEMORY_SECRET` is checked, which is why the existing viewer works unchanged once you are logged in.
+
+### Routes
+
+Every route is mounted twice — at `/dashboard/*` and at `/agentmemory/dashboard/*`. The engine's HTTP router is a flat exact-path registry and every other path in this project lives under `/agentmemory`, so the top-level prefix is the URL you want but the prefixed twin is the guaranteed fallback.
+
+| Route | Auth | Purpose |
+|---|---|---|
+| `GET /dashboard/ping` | none | Reports which mount routes on your engine, and whether a password is set |
+| `GET /dashboard/view` | none | Login form without a session; the full viewer with one |
+| `POST /dashboard/login` | password | Issues the session cookie |
+| `POST /dashboard/logout` | none | Expires the cookie |
+
+Probe the mount first — if this returns `404`, use `/agentmemory/dashboard/view` instead:
+
+```bash
+curl -s https://your-host/dashboard/ping
+```
+
+### Configuration
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `AGENTMEMORY_PASSWORD` | *(unset)* | Dashboard password. Unset disables the feature |
+| `AGENTMEMORY_DASHBOARD_SESSION_TTL` | `120` | Session lifetime in minutes, clamped to `5`–`1440` |
+| `AGENTMEMORY_DASHBOARD_MAX_ATTEMPTS` | `5` | Failed logins before lockout |
+| `AGENTMEMORY_DASHBOARD_LOCKOUT_MINUTES` | `15` | Attempt window and lockout duration |
+| `AGENTMEMORY_DASHBOARD_COOKIE_INSECURE` | `false` | Drops `Secure` for plain-HTTP local testing only |
+
+### Before you expose it
+
+**Use a long random password.** The login form is reachable by anyone who can reach the host — that is unavoidable, since a browser has to be able to load it. Rate limiting (5 attempts, then a 15-minute lockout per client) raises the cost of a brute force, but it keys on `X-Forwarded-For`, which a client controls and can rotate. Password length is the real defense, not the limiter.
+
+**Serve it over HTTPS.** The session cookie is `Secure`, so a browser will silently discard it over plain `http://` — login appears to succeed and the page never unlocks. `AGENTMEMORY_DASHBOARD_COOKIE_INSECURE=true` exists for local testing and should never be set on a public deployment.
+
+**The live stream needs a WebSocket proxy.** The viewer pushes updates over the engine's stream port (`3112`). If your reverse proxy does not forward `Upgrade` headers, the dashboard falls back to polling — data still refreshes, just not pushed.
 
 ---
 

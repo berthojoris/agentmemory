@@ -8,6 +8,7 @@ import type { MetricsStore } from "../eval/metrics-store.js";
 import type { ResilientProvider } from "../providers/resilient.js";
 import { VERSION } from "../version.js";
 import { timingSafeCompare } from "../auth.js";
+import { hasValidDashboardSession } from "../dashboard/session.js";
 import { isSlotsEnabled, isReflectEnabled } from "../functions/slots.js";
 import { renderViewerDocument } from "../viewer/document.js";
 import { getBoundViewerPort, getViewerSkipped } from "../viewer/server.js";
@@ -43,12 +44,18 @@ function checkAuth(
   if (!secret) return null;
   const auth = req.headers?.["authorization"] || req.headers?.["Authorization"];
   if (
-    typeof auth !== "string" ||
-    !timingSafeCompare(auth, `Bearer ${secret}`)
+    typeof auth === "string" &&
+    timingSafeCompare(auth, `Bearer ${secret}`)
   ) {
-    return { status_code: 401, body: { error: "unauthorized" } };
+    return null;
   }
-  return null;
+  // Second accepted credential: a dashboard session cookie. The browser
+  // cannot hold the bearer (it never sees AGENTMEMORY_SECRET), so the
+  // signed session issued by POST /dashboard/login authorizes the same
+  // surface for the lifetime of that cookie. Off unless the operator sets
+  // AGENTMEMORY_PASSWORD — see hasValidDashboardSession.
+  if (hasValidDashboardSession(req.headers)) return null;
+  return { status_code: 401, body: { error: "unauthorized" } };
 }
 
 function requireConfiguredSecret(
@@ -150,16 +157,23 @@ export function registerApiTriggers(
       if (!secret) return { action: "continue" };
       const headers = input?.request?.headers || {};
       const auth = headers["authorization"] || headers["Authorization"];
-      if (
-        typeof auth !== "string" ||
-        !timingSafeCompare(auth, `Bearer ${secret}`)
-      ) {
-        return {
-          action: "respond",
-          response: { status_code: 401, body: { error: "unauthorized" } },
-        };
+      if (typeof auth === "string" && timingSafeCompare(auth, `Bearer ${secret}`)) {
+        return { action: "continue" };
       }
-      return { action: "continue" };
+      // Mirrors checkAuth: a valid dashboard session cookie is the second
+      // accepted credential, so the 12 middleware-guarded routes stay
+      // reachable from the browser dashboard.
+      if (
+        hasValidDashboardSession(
+          headers as Record<string, string | string[]>,
+        )
+      ) {
+        return { action: "continue" };
+      }
+      return {
+        action: "respond",
+        response: { status_code: 401, body: { error: "unauthorized" } },
+      };
     },
   );
 
